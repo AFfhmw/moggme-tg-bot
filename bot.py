@@ -2,6 +2,9 @@ import asyncio
 import logging
 import io
 import random
+import math
+import multiprocessing
+from multiprocessing import Process, Queue
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
@@ -21,30 +24,6 @@ REQUIRED_CHANNELS = ["@moggme1", "@looksmogg"]
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
-
-_face_mesh = None
-_mediapipe_imported = False
-
-def _lazy_init_facemesh():
-    global _face_mesh, _mediapipe_imported
-    if _face_mesh is not None:
-        return _face_mesh
-    if not _mediapipe_imported:
-        _mediapipe_imported = True
-        import cv2
-        import mediapipe as mp
-        import numpy as np
-        globals()['_cv2'] = cv2
-        globals()['_mp'] = mp
-        globals()['_np'] = np
-        mp_face_mesh = mp.solutions.face_mesh
-        _face_mesh = mp_face_mesh.FaceMesh(
-            static_image_mode=True,
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5
-        )
-    return _face_mesh
 
 STARS_SHOP = {
     "premium_report": {"stars": 1, "title": "💎 Premium-отчёт", "description": "Расширенный анализ лица: перцентиль среди всех юзеров, потенциал улучшения, детальное сравнение с идеалом. Отправь фото после оплаты."},
@@ -181,44 +160,7 @@ class Broadcast(StatesGroup):
     waiting_for_text = State()
 
 def calculate_distance(p1, p2):
-    import math
     return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
-
-def draw_landmarks(image_bytes, landmarks, w, h):
-    import numpy as np
-    import cv2
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-    img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
-    img_pil = Image.fromarray(img_rgb)
-    draw = ImageDraw.Draw(img_pil)
-    points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks.landmark]
-    nose_x, _ = points[1]
-    draw.line([(nose_x, points[10][1]), (nose_x, points[152][1])], fill=(0,255,0), width=2)
-    draw.line([points[234], points[454]], fill=(255,255,0), width=2)
-    draw.line([points[58], points[288]], fill=(0,255,255), width=2)
-    draw.line([points[468], points[473]], fill=(255,0,255), width=2)
-    draw.line([points[98], points[327]], fill=(128,0,128), width=2)
-    draw.line([points[61], points[291]], fill=(255,0,0), width=2)
-    draw.line([points[168], points[1]], fill=(0,128,128), width=2)
-    draw.line([points[33], points[133]], fill=(255,128,0), width=2)
-    draw.line([points[362], points[263]], fill=(255,128,0), width=2)
-    buf = io.BytesIO()
-    img_pil.save(buf, format='JPEG', quality=90)
-    buf.seek(0)
-    return buf
-
-def calculate_canthal_tilt(points):
-    import numpy as np
-    left_outer = np.array(points[33])
-    left_inner = np.array(points[133])
-    dx_l, dy_l = left_outer - left_inner
-    left_tilt = np.degrees(np.arctan2(dy_l, dx_l))
-    right_inner = np.array(points[362])
-    right_outer = np.array(points[263])
-    dx_r, dy_r = right_outer - right_inner
-    right_tilt = np.degrees(np.arctan2(dy_r, -dx_r))
-    return round((left_tilt + right_tilt) / 2, 1)
 
 def generate_roast(psl, canthal_tilt, symmetry):
     roasts = []
@@ -246,154 +188,129 @@ def get_psl_category(psl):
     else:
         return "👑 Элитный"
 
-def analyze_face(image_bytes):
-    face_mesh = _lazy_init_facemesh()
-    np = globals()['_np']
-    cv2 = globals()['_cv2']
+def _analyze_in_worker(q, image_bytes):
+    """Runs in a SEPARATE PROCESS. Loads mediapipe, analyzes, returns result, then DIES."""
+    import cv2
+    import numpy as np
+    import mediapipe as mp
+    from PIL import Image, ImageDraw
+    import io
+    import math
+
+    def calc_dist(a, b):
+        return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
+
+    face_mesh = mp.solutions.face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5)
 
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
-        return {"error": "Не удалось прочитать изображение"}
+        q.put({"error": "Не удалось прочитать изображение"})
+        return
     h, w, _ = img.shape
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(img_rgb)
     if not results.multi_face_landmarks:
-        return {"error": "Лицо не обнаружено. Отправь чёткое анфас-фото."}
+        q.put({"error": "Лицо не обнаружено. Отправь чёткое анфас-фото."})
+        return
     landmarks = results.multi_face_landmarks[0]
     points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks.landmark]
 
     nose_center = points[1]
     sellion = points[168]
     chin = points[152]
-    zy_left, zy_right = points[234], points[454]
-    bizygomatic_width = calculate_distance(zy_left, zy_right)
-    go_left, go_right = points[58], points[288]
-    bigonial_width = calculate_distance(go_left, go_right)
-    left_pupil, right_pupil = points[468], points[473]
-    ipd = calculate_distance(left_pupil, right_pupil)
-    alar_left, alar_right = points[98], points[327]
-    nose_width = calculate_distance(alar_left, alar_right)
-    mouth_left, mouth_right = points[61], points[291]
-    mouth_width = calculate_distance(mouth_left, mouth_right)
+    bizygomatic_width = calc_dist(points[234], points[454])
+    bigonial_width = calc_dist(points[58], points[288])
+    ipd = calc_dist(points[468], points[473])
+    nose_width = calc_dist(points[98], points[327])
+    mouth_width = calc_dist(points[61], points[291])
 
     sym_pairs = [(33, 263), (133, 362), (234, 454), (58, 288), (98, 327), (61, 291), (105, 334)]
     deviations = []
     nose_x, _ = nose_center
-    for left_idx, right_idx in sym_pairs:
-        lx, _ = points[left_idx]
-        rx, _ = points[right_idx]
-        dist_left = abs(lx - nose_x)
-        dist_right = abs(rx - nose_x)
-        if max(dist_left, dist_right) > 0:
-            dev = abs(dist_left - dist_right) / max(dist_left, dist_right)
-            deviations.append(dev)
+    for li, ri in sym_pairs:
+        lx, _ = points[li]
+        rx, _ = points[ri]
+        dl = abs(lx - nose_x)
+        dr = abs(rx - nose_x)
+        if max(dl, dr) > 0:
+            deviations.append(abs(dl - dr) / max(dl, dr))
     symmetry_score = 1 - np.mean(deviations) if deviations else 0
 
-    if bizygomatic_width > 0:
-        ipd_ratio = ipd / bizygomatic_width
-        ipd_score = 1 - min(abs(ipd_ratio - 0.46) / 0.1, 1.0)
-    else:
-        ipd_score = 0.5
-
-    if ipd > 0:
-        nose_width_ratio = nose_width / ipd
-        nose_width_score = float(np.exp(-((nose_width_ratio - 1.0) ** 2) / (2 * (0.3 ** 2))))
-        nose_width_score = max(0.1, nose_width_score)
-    else:
-        nose_width_score = 0.5
-
-    if bizygomatic_width > 0:
-        mouth_ratio = mouth_width / bizygomatic_width
-        mouth_score = 1 - min(abs(mouth_ratio - 0.4) / 0.1, 1.0)
-    else:
-        mouth_score = 0.5
-
-    if bizygomatic_width > 0:
-        jaw_ratio = bigonial_width / bizygomatic_width
-        jaw_score = 1 - min(abs(jaw_ratio - 0.88) / 0.88, 1.0)
-    else:
-        jaw_score = 0.5
+    ipd_score = (1 - min(abs(ipd / bizygomatic_width - 0.46) / 0.1, 1.0)) if bizygomatic_width > 0 else 0.5
+    nose_width_score = max(0.1, float(np.exp(-((nose_width / ipd - 1.0) ** 2) / (2 * 0.09)))) if ipd > 0 else 0.5
+    mouth_score = (1 - min(abs(mouth_width / bizygomatic_width - 0.4) / 0.1, 1.0)) if bizygomatic_width > 0 else 0.5
+    jaw_score = (1 - min(abs(bigonial_width / bizygomatic_width - 0.88) / 0.88, 1.0)) if bizygomatic_width > 0 else 0.5
 
     eye_center_y = (points[159][1] + points[386][1]) / 2
-    mouth_y = points[13][1]
-    chin_y = chin[1]
-    upper = mouth_y - eye_center_y
-    lower = chin_y - mouth_y
-    if lower > 0:
-        gold_vert_score = 1 - min(abs((upper/lower) - 1.618) / 1.618, 1.0)
-    else:
-        gold_vert_score = 0.5
+    upper = points[13][1] - eye_center_y
+    lower = chin[1] - points[13][1]
+    gold_vert_score = (1 - min(abs((upper / lower) - 1.618) / 1.618, 1.0)) if lower > 0 else 0.5
 
-    left_eye_width = calculate_distance(points[33], points[133])
-    right_eye_width = calculate_distance(points[362], points[263])
-    eye_width_avg = (left_eye_width + right_eye_width) / 2
-    eye_distance = calculate_distance(points[133], points[362])
-    if eye_distance > 0:
-        gold_horiz_score = 1 - min(abs((eye_width_avg / eye_distance) - 1.0), 1.0)
-    else:
-        gold_horiz_score = 0.5
+    eye_w = (calc_dist(points[33], points[133]) + calc_dist(points[362], points[263])) / 2
+    eye_d = calc_dist(points[133], points[362])
+    gold_horiz_score = (1 - min(abs(eye_w / eye_d - 1.0), 1.0)) if eye_d > 0 else 0.5
 
-    tilt = calculate_canthal_tilt(points)
-    ideal_tilt = 6.0
-    tilt_score = max(0, 1 - abs(tilt - ideal_tilt) / 10)
+    left_outer = np.array(points[33]); left_inner = np.array(points[133])
+    left_tilt = np.degrees(np.arctan2(*(left_outer - left_inner)[::-1]))
+    right_inner = np.array(points[362]); right_outer = np.array(points[263])
+    right_tilt = np.degrees(np.arctan2(*(right_outer - right_inner)[::-1]) * np.array([-1, 1]))
+    tilt = round((left_tilt + right_tilt) / 2, 1)
+    tilt_score = max(0, 1 - abs(tilt - 6.0) / 10)
 
-    psl_raw = (
-        symmetry_score * 0.25 +
-        ipd_score * 0.15 +
-        nose_width_score * 0.1 +
-        mouth_score * 0.1 +
-        jaw_score * 0.15 +
-        gold_vert_score * 0.1 +
-        gold_horiz_score * 0.05 +
-        tilt_score * 0.1
-    ) * 7 + 1
+    psl_raw = (symmetry_score*0.25 + ipd_score*0.15 + nose_width_score*0.1 + mouth_score*0.1 + jaw_score*0.15 + gold_vert_score*0.1 + gold_horiz_score*0.05 + tilt_score*0.1) * 7 + 1
     psl = round(min(max(psl_raw, 1.0), 8.0), 1)
 
     tips = []
-    if symmetry_score < 0.75:
-        tips.append("🔹 Асимметрия: сон на спине, упражнения для лица, ортодонт.")
-    if ipd_score < 0.6:
-        tips.append("🔹 Межглазное расстояние: подбери форму бровей, макияж глаз.")
-    if nose_width_score < 0.6:
-        tips.append("🔹 Ширина носа: контуринг, коррекция бровей для визуального баланса.")
-    if mouth_score < 0.6:
-        tips.append("🔹 Ширина рта: макияж губ, форма усов/бороды.")
-    if jaw_score < 0.7:
-        tips.append("🔹 Челюсть: mewing, жёсткая пища, ортодонт.")
-    if gold_vert_score < 0.6:
-        tips.append("🔹 Вертикальные пропорции: корректировка причёской/бородой.")
-    if gold_horiz_score < 0.5:
-        tips.append("🔹 Расстояние между глазами: форма бровей, макияж.")
-    if not tips:
-        tips.append("✅ Гармоничные черты, так держать!")
+    if symmetry_score < 0.75: tips.append("🔹 Асимметрия: сон на спине, упражнения для лица, ортодонт.")
+    if ipd_score < 0.6: tips.append("🔹 Межглазное расстояние: подбери форму бровей, макияж глаз.")
+    if nose_width_score < 0.6: tips.append("🔹 Ширина носа: контуринг, коррекция бровей.")
+    if mouth_score < 0.6: tips.append("🔹 Ширина рта: макияж губ, форма усов/бороды.")
+    if jaw_score < 0.7: tips.append("🔹 Челюсть: mewing, жёсткая пища, ортодонт.")
+    if gold_vert_score < 0.6: tips.append("🔹 Вертикальные пропорции: причёска/борода.")
+    if gold_horiz_score < 0.5: tips.append("🔹 Расстояние между глазами: форма бровей.")
+    if not tips: tips.append("✅ Гармоничные черты, так держать!")
 
-    annotated_img = draw_landmarks(image_bytes, landmarks, w, h)
+    # Draw landmarks
+    img_cv2 = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
+    img_pil = Image.fromarray(cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img_pil)
+    for color, pairs in [
+        ((0,255,0), [(10,1), (1,152)]), ((255,255,0), [(234,454)]), ((0,255,255), [(58,288)]),
+        ((255,0,255), [(468,473)]), ((128,0,128), [(98,327)]), ((255,0,0), [(61,291)]),
+        ((0,128,128), [(168,1)]), ((255,128,0), [(33,133), (362,263)])
+    ]:
+        for a, b in pairs:
+            draw.line([points[a], points[b]], fill=color, width=2)
+    buf = io.BytesIO()
+    img_pil.save(buf, format='JPEG', quality=90)
+    buf.seek(0)
+    annotated_bytes = buf.getvalue()
 
-    return {
-        "psl": psl,
-        "symmetry": round(symmetry_score * 100),
-        "ipd_score": round(ipd_score * 100),
-        "nose_width_score": round(nose_width_score * 100),
-        "mouth_score": round(mouth_score * 100),
-        "jaw": round(jaw_score * 100),
-        "gold_vert": round(gold_vert_score * 100),
-        "gold_horiz": round(gold_horiz_score * 100),
-        "canthal_tilt": tilt,
-        "tilt_score": round(tilt_score * 100),
-        "tips": tips,
-        "annotated_image": annotated_img,
-        "raw_scores": {
-            "symmetry": symmetry_score,
-            "ipd": ipd_score,
-            "nose": nose_width_score,
-            "mouth": mouth_score,
-            "jaw": jaw_score,
-            "gold_vert": gold_vert_score,
-            "gold_horiz": gold_horiz_score,
-            "tilt": tilt_score,
-        }
-    }
+    q.put({
+        "psl": psl, "symmetry": round(symmetry_score * 100),
+        "ipd_score": round(ipd_score * 100), "nose_width_score": round(nose_width_score * 100),
+        "mouth_score": round(mouth_score * 100), "jaw": round(jaw_score * 100),
+        "gold_vert": round(gold_vert_score * 100), "gold_horiz": round(gold_horiz_score * 100),
+        "canthal_tilt": tilt, "tilt_score": round(tilt_score * 100), "tips": tips,
+        "annotated_image_bytes": annotated_bytes,
+        "raw_scores": {"symmetry": symmetry_score, "ipd": ipd_score, "nose": nose_width_score,
+                       "mouth": mouth_score, "jaw": jaw_score, "gold_vert": gold_vert_score,
+                       "gold_horiz": gold_horiz_score, "tilt": tilt_score}
+    })
+
+async def analyze_face_async(image_bytes):
+    """Runs analyze_face in a separate process. Process dies after, freeing all memory."""
+    q = Queue()
+    p = Process(target=_analyze_in_worker, args=(q, image_bytes))
+    p.start()
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, q.get)
+    p.join(timeout=30)
+    if p.is_alive():
+        p.terminate()
+    p.close()
+    return result
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1128,14 +1045,13 @@ async def handle_photo(message: types.Message):
     is_premium = await has_pending_premium(message.from_user.id) or await is_eternal_premium(message.from_user.id)
     await message.answer("🔍 Анализирую лицо..." if not is_premium else "💎 Premium-анализ...", reply_markup=get_main_keyboard())
 
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, analyze_face, img_bytes)
+    result = await analyze_face_async(img_bytes)
 
     if "error" in result:
         await message.answer(f"❌ {result['error']}", reply_markup=get_main_keyboard())
         return
 
-    annotated = result['annotated_image'].getvalue()
+    annotated = result['annotated_image_bytes']
     await message.answer_photo(BufferedInputFile(annotated, filename="face.jpg"), caption="🔍 Разметка лица")
 
     if is_premium:
