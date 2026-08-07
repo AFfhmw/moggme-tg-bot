@@ -3,8 +3,8 @@ import logging
 import io
 import random
 import math
-import multiprocessing
-from multiprocessing import Process, Queue
+import gc
+from concurrent.futures import ProcessPoolExecutor
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
@@ -188,7 +188,7 @@ def get_psl_category(psl):
     else:
         return "👑 Элитный"
 
-def _analyze_in_worker(q, image_bytes):
+def _analyze_in_worker(image_bytes):
     """Runs in a SEPARATE PROCESS. Loads mediapipe, analyzes, returns result, then DIES."""
     import cv2
     import numpy as np
@@ -205,14 +205,12 @@ def _analyze_in_worker(q, image_bytes):
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
-        q.put({"error": "Не удалось прочитать изображение"})
-        return
+        return {"error": "Не удалось прочитать изображение"}
     h, w, _ = img.shape
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     results = face_mesh.process(img_rgb)
     if not results.multi_face_landmarks:
-        q.put({"error": "Лицо не обнаружено. Отправь чёткое анфас-фото."})
-        return
+        return {"error": "Лицо не обнаружено. Отправь чёткое анфас-фото."}
     landmarks = results.multi_face_landmarks[0]
     points = [(int(lm.x * w), int(lm.y * h)) for lm in landmarks.landmark]
 
@@ -271,7 +269,6 @@ def _analyze_in_worker(q, image_bytes):
     if gold_horiz_score < 0.5: tips.append("🔹 Расстояние между глазами: форма бровей.")
     if not tips: tips.append("✅ Гармоничные черты, так держать!")
 
-    # Draw landmarks
     img_cv2 = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), cv2.IMREAD_COLOR)
     img_pil = Image.fromarray(cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(img_pil)
@@ -287,7 +284,7 @@ def _analyze_in_worker(q, image_bytes):
     buf.seek(0)
     annotated_bytes = buf.getvalue()
 
-    q.put({
+    return {
         "psl": psl, "symmetry": round(symmetry_score * 100),
         "ipd_score": round(ipd_score * 100), "nose_width_score": round(nose_width_score * 100),
         "mouth_score": round(mouth_score * 100), "jaw": round(jaw_score * 100),
@@ -297,19 +294,18 @@ def _analyze_in_worker(q, image_bytes):
         "raw_scores": {"symmetry": symmetry_score, "ipd": ipd_score, "nose": nose_width_score,
                        "mouth": mouth_score, "jaw": jaw_score, "gold_vert": gold_vert_score,
                        "gold_horiz": gold_horiz_score, "tilt": tilt_score}
-    })
+    }
+
+_pool = ProcessPoolExecutor(max_workers=1)
 
 async def analyze_face_async(image_bytes):
     """Runs analyze_face in a separate process. Process dies after, freeing all memory."""
-    q = Queue()
-    p = Process(target=_analyze_in_worker, args=(q, image_bytes))
-    p.start()
-    loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, q.get)
-    p.join(timeout=30)
-    if p.is_alive():
-        p.terminate()
-    p.close()
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(loop.run_in_executor(_pool, _analyze_in_worker, image_bytes), timeout=60)
+    except (asyncio.TimeoutError, Exception) as e:
+        result = {"error": f"Ошибка анализа: {type(e).__name__}: {e}"}
+    gc.collect()
     return result
 
 async def init_db():
