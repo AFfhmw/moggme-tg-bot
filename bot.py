@@ -1833,14 +1833,43 @@ async def self_ping():
         await asyncio.sleep(600)
 
 async def main():
-    logging.basicConfig(level=logging.INFO)
-    await init_db()
-    dp.message.middleware.register(SubscriptionMiddleware())
-    asyncio.create_task(update_quests())
-    asyncio.create_task(self_ping())
-    await start_http_server()
-    print("Бот запущен. Health-check на порту 8080. Self-ping каждые 10 мин.")
-    await dp.start_polling(bot)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.info("=== Starting moggme-tg-bot ===")
+    try:
+        logging.info("Step 1: init_db...")
+        await init_db()
+        logging.info("Step 1: OK")
+    except Exception as e:
+        logging.error(f"Step 1 FAILED: {e}")
+
+    try:
+        logging.info("Step 2: register middleware...")
+        dp.message.middleware.register(SubscriptionMiddleware())
+        logging.info("Step 2: OK")
+    except Exception as e:
+        logging.error(f"Step 2 FAILED: {e}")
+
+    try:
+        logging.info("Step 3: create tasks...")
+        asyncio.create_task(update_quests())
+        asyncio.create_task(self_ping())
+        logging.info("Step 3: OK")
+    except Exception as e:
+        logging.error(f"Step 3 FAILED: {e}")
+
+    try:
+        logging.info("Step 4: start http server...")
+        await start_http_server()
+        logging.info("Step 4: OK - HTTP server on port 8080")
+    except Exception as e:
+        logging.error(f"Step 4 FAILED: {e}")
+
+    logging.info("Step 5: Starting bot polling...")
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logging.error(f"Bot polling CRASHED: {e}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
