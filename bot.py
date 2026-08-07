@@ -2,9 +2,6 @@ import asyncio
 import logging
 import io
 import random
-import numpy as np
-import cv2
-import mediapipe as mp
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
@@ -25,37 +22,37 @@ REQUIRED_CHANNELS = ["@moggme1", "@looksmogg"]
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
+_face_mesh = None
+_mediapipe_imported = False
+
+def _lazy_init_facemesh():
+    global _face_mesh, _mediapipe_imported
+    if _face_mesh is not None:
+        return _face_mesh
+    if not _mediapipe_imported:
+        _mediapipe_imported = True
+        import cv2
+        import mediapipe as mp
+        import numpy as np
+        globals()['_cv2'] = cv2
+        globals()['_mp'] = mp
+        globals()['_np'] = np
+        mp_face_mesh = mp.solutions.face_mesh
+        _face_mesh = mp_face_mesh.FaceMesh(
+            static_image_mode=True,
+            max_num_faces=1,
+            refine_landmarks=True,
+            min_detection_confidence=0.5
+        )
+    return _face_mesh
+
 STARS_SHOP = {
-    "premium_report": {
-        "stars": 1,
-        "title": "💎 Premium-отчёт",
-        "description": "Расширенный анализ лица: перцентиль среди всех юзеров, потенциал улучшения, детальное сравнение с идеалом. Отправь фото после оплаты."
-    },
-    "vip_30": {
-        "stars": 99,
-        "title": "👑 VIP на 30 дней",
-        "description": "VIP-значок 👑 в профиле и топе, +50% монет за все действия, ежедневный бонус 200 монет."
-    },
-    "coins_pack": {
-        "stars": 25,
-        "title": "🪙 Пак монет (1000)",
-        "description": "1000 монет для магазина — купи себе ELO или другие плюшки."
-    },
-    "elo_boost": {
-        "stars": 75,
-        "title": "🚀 ELO Буст +300",
-        "description": "Мгновенное добавление 300 очков рейтинга. Залети в топ!"
-    },
-    "platinum_nick": {
-        "stars": 150,
-        "title": "💠 Платиновый ник навсегда",
-        "description": "Вечный платиновый значок 💠 перед ником в профиле и топе. Навсегда."
-    },
-    "eternal_premium": {
-        "stars": 88,
-        "title": "♾ Вечный Premium-отчёт",
-        "description": "Каждый анализ лица — всегда в Premium-формате: перцентиль, потенциал, детальный разбор vs идеал. Навсегда, без доплат."
-    },
+    "premium_report": {"stars": 1, "title": "💎 Premium-отчёт", "description": "Расширенный анализ лица: перцентиль среди всех юзеров, потенциал улучшения, детальное сравнение с идеалом. Отправь фото после оплаты."},
+    "vip_30": {"stars": 99, "title": "👑 VIP на 30 дней", "description": "VIP-значок 👑 в профиле и топе, +50% монет за все действия, ежедневный бонус 200 монет."},
+    "coins_pack": {"stars": 25, "title": "🪙 Пак монет (1000)", "description": "1000 монет для магазина — купи себе ELO или другие плюшки."},
+    "elo_boost": {"stars": 75, "title": "🚀 ELO Буст +300", "description": "Мгновенное добавление 300 очков рейтинга. Залети в топ!"},
+    "platinum_nick": {"stars": 150, "title": "💠 Платиновый ник навсегда", "description": "Вечный платиновый значок 💠 перед ником в профиле и топе. Навсегда."},
+    "eternal_premium": {"stars": 88, "title": "♾ Вечный Premium-отчёт", "description": "Каждый анализ лица — всегда в Premium-формате: перцентиль, потенциал, детальный разбор vs идеал. Навсегда, без доплат."},
 }
 
 possible_quests = [
@@ -78,7 +75,7 @@ async def update_quests():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM quest_claims WHERE cycle_expires < ?", (datetime.now(),))
             await db.commit()
-        logging.info(f"Квесты обновлены: {[q['desc'] for q in current_quests]}")
+        logging.info(f"Quests updated: {[q['desc'] for q in current_quests]}")
         await asyncio.sleep(300)
 
 async def check_and_award_quest(user_id, check_type, value=None, increment=1):
@@ -145,7 +142,7 @@ class SubscriptionMiddleware(BaseMiddleware):
                 if chat_member.status not in ('member', 'administrator', 'creator'):
                     missing.append(channel)
             except Exception as e:
-                logging.error(f"Ошибка проверки канала {channel} для {user_id}: {e}")
+                logging.error(f"Channel check error {channel} for {user_id}: {e}")
                 missing.append(channel)
         if not missing:
             return await handler(event, data)
@@ -183,18 +180,13 @@ class Battle(StatesGroup):
 class Broadcast(StatesGroup):
     waiting_for_text = State()
 
-mp_face_mesh = mp.solutions.face_mesh
-face_mesh = mp_face_mesh.FaceMesh(
-    static_image_mode=True,
-    max_num_faces=1,
-    refine_landmarks=True,
-    min_detection_confidence=0.5
-)
-
 def calculate_distance(p1, p2):
-    return np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+    import math
+    return math.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
 
 def draw_landmarks(image_bytes, landmarks, w, h):
+    import numpy as np
+    import cv2
     nparr = np.frombuffer(image_bytes, np.uint8)
     img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
@@ -217,6 +209,7 @@ def draw_landmarks(image_bytes, landmarks, w, h):
     return buf
 
 def calculate_canthal_tilt(points):
+    import numpy as np
     left_outer = np.array(points[33])
     left_inner = np.array(points[133])
     dx_l, dy_l = left_outer - left_inner
@@ -254,6 +247,10 @@ def get_psl_category(psl):
         return "👑 Элитный"
 
 def analyze_face(image_bytes):
+    face_mesh = _lazy_init_facemesh()
+    np = globals()['_np']
+    cv2 = globals()['_cv2']
+
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None:
@@ -279,14 +276,8 @@ def analyze_face(image_bytes):
     nose_width = calculate_distance(alar_left, alar_right)
     mouth_left, mouth_right = points[61], points[291]
     mouth_width = calculate_distance(mouth_left, mouth_right)
-    nose_tip = points[1]
-    nose_height = calculate_distance(sellion, nose_tip)
-    sellion_to_chin = calculate_distance(sellion, chin)
 
-    sym_pairs = [
-        (33, 263), (133, 362), (234, 454), (58, 288),
-        (98, 327), (61, 291), (105, 334)
-    ]
+    sym_pairs = [(33, 263), (133, 362), (234, 454), (58, 288), (98, 327), (61, 291), (105, 334)]
     deviations = []
     nose_x, _ = nose_center
     for left_idx, right_idx in sym_pairs:
@@ -307,7 +298,7 @@ def analyze_face(image_bytes):
 
     if ipd > 0:
         nose_width_ratio = nose_width / ipd
-        nose_width_score = np.exp(-((nose_width_ratio - 1.0) ** 2) / (2 * (0.3 ** 2)))
+        nose_width_score = float(np.exp(-((nose_width_ratio - 1.0) ** 2) / (2 * (0.3 ** 2))))
         nose_width_score = max(0.1, nose_width_score)
     else:
         nose_width_score = 0.5
@@ -406,111 +397,25 @@ def analyze_face(image_bytes):
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                nickname TEXT UNIQUE,
-                elo INTEGER DEFAULT 1000,
-                wins INTEGER DEFAULT 0,
-                losses INTEGER DEFAULT 0
-            )
-        """)
+        await db.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, nickname TEXT UNIQUE, elo INTEGER DEFAULT 1000, wins INTEGER DEFAULT 0, losses INTEGER DEFAULT 0)")
         cursor = await db.execute("PRAGMA table_info(users)")
         columns = [col[1] for col in await cursor.fetchall()]
         if 'wins' not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN wins INTEGER DEFAULT 0")
         if 'losses' not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN losses INTEGER DEFAULT 0")
-
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS scores (
-                user_id INTEGER,
-                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                psl REAL,
-                symmetry INTEGER,
-                canthal_tilt REAL,
-                jaw INTEGER
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS bans (
-                user_id INTEGER PRIMARY KEY,
-                reason TEXT,
-                until TIMESTAMP,
-                banned_by INTEGER
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS mutes (
-                user_id INTEGER PRIMARY KEY,
-                until TIMESTAMP,
-                muted_by INTEGER
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS warns (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                reason TEXT,
-                warned_by INTEGER,
-                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS user_coins (
-                user_id INTEGER PRIMARY KEY,
-                coins INTEGER DEFAULT 0
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS quest_claims (
-                user_id INTEGER,
-                quest_id INTEGER,
-                cycle_expires TIMESTAMP,
-                PRIMARY KEY (user_id, quest_id)
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS quest_progress (
-                user_id INTEGER,
-                quest_id INTEGER,
-                progress INTEGER DEFAULT 0,
-                PRIMARY KEY (user_id, quest_id)
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS vip_status (
-                user_id INTEGER PRIMARY KEY,
-                expires TIMESTAMP,
-                last_daily_bonus DATE
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS platinum_users (
-                user_id INTEGER PRIMARY KEY,
-                granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS pending_premium_report (
-                user_id INTEGER PRIMARY KEY,
-                granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS eternal_premium_users (
-                user_id INTEGER PRIMARY KEY,
-                granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS referrals (
-                user_id INTEGER PRIMARY KEY,
-                referred_by INTEGER,
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                rewarded INTEGER DEFAULT 0
-            )
-        """)
+        await db.execute("CREATE TABLE IF NOT EXISTS scores (user_id INTEGER, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP, psl REAL, symmetry INTEGER, canthal_tilt REAL, jaw INTEGER)")
+        await db.execute("CREATE TABLE IF NOT EXISTS bans (user_id INTEGER PRIMARY KEY, reason TEXT, until TIMESTAMP, banned_by INTEGER)")
+        await db.execute("CREATE TABLE IF NOT EXISTS mutes (user_id INTEGER PRIMARY KEY, until TIMESTAMP, muted_by INTEGER)")
+        await db.execute("CREATE TABLE IF NOT EXISTS warns (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, reason TEXT, warned_by INTEGER, date TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        await db.execute("CREATE TABLE IF NOT EXISTS user_coins (user_id INTEGER PRIMARY KEY, coins INTEGER DEFAULT 0)")
+        await db.execute("CREATE TABLE IF NOT EXISTS quest_claims (user_id INTEGER, quest_id INTEGER, cycle_expires TIMESTAMP, PRIMARY KEY (user_id, quest_id))")
+        await db.execute("CREATE TABLE IF NOT EXISTS quest_progress (user_id INTEGER, quest_id INTEGER, progress INTEGER DEFAULT 0, PRIMARY KEY (user_id, quest_id))")
+        await db.execute("CREATE TABLE IF NOT EXISTS vip_status (user_id INTEGER PRIMARY KEY, expires TIMESTAMP, last_daily_bonus DATE)")
+        await db.execute("CREATE TABLE IF NOT EXISTS platinum_users (user_id INTEGER PRIMARY KEY, granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        await db.execute("CREATE TABLE IF NOT EXISTS pending_premium_report (user_id INTEGER PRIMARY KEY, granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        await db.execute("CREATE TABLE IF NOT EXISTS eternal_premium_users (user_id INTEGER PRIMARY KEY, granted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        await db.execute("CREATE TABLE IF NOT EXISTS referrals (user_id INTEGER PRIMARY KEY, referred_by INTEGER, joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, rewarded INTEGER DEFAULT 0)")
         await db.commit()
 
 async def get_ref_count(user_id):
@@ -542,11 +447,7 @@ async def try_reward_referrer(user_id):
         await db.commit()
     nick = await get_nickname(user_id) or "Новичок"
     try:
-        await bot.send_message(referrer_id,
-            f"🎉 **Реферал активирован!**\n\n"
-            f"Твой приглашённый **{nick}** прошёл первый анализ лица!\n"
-            f"Ты получаешь **+150 монет** за реферала 🪙\n\n"
-            f"Приглашай ещё — каждый активный реферал = +150 монет!")
+        await bot.send_message(referrer_id, f"🎉 **Реферал активирован!**\n\nТвой приглашённый **{nick}** прошёл первый анализ лица!\nТы получаешь **+150 монет** за реферала 🪙\n\nПриглашай ещё — каждый активный реферал = +150 монет!")
     except:
         pass
 
@@ -561,11 +462,7 @@ async def is_vip(user_id):
 async def give_vip(user_id, days):
     expires = datetime.now() + timedelta(days=days)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            INSERT INTO vip_status (user_id, expires, last_daily_bonus)
-            VALUES (?, ?, NULL)
-            ON CONFLICT(user_id) DO UPDATE SET expires = ?
-        """, (user_id, expires.isoformat(), expires.isoformat()))
+        await db.execute("INSERT INTO vip_status (user_id, expires, last_daily_bonus) VALUES (?, ?, NULL) ON CONFLICT(user_id) DO UPDATE SET expires = ?", (user_id, expires.isoformat(), expires.isoformat()))
         await db.commit()
 
 async def claim_vip_daily_bonus(user_id):
@@ -588,8 +485,7 @@ async def claim_vip_daily_bonus(user_id):
 async def is_platinum(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT 1 FROM platinum_users WHERE user_id=?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-    return row is not None
+            return (await cursor.fetchone()) is not None
 
 async def give_platinum(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -599,13 +495,11 @@ async def give_platinum(user_id):
 async def has_pending_premium(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT 1 FROM pending_premium_report WHERE user_id=?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-    return row is not None
+            return (await cursor.fetchone()) is not None
 
 async def set_pending_premium(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT OR REPLACE INTO pending_premium_report (user_id, granted_at) VALUES (?, ?)",
-                         (user_id, datetime.now().isoformat()))
+        await db.execute("INSERT OR REPLACE INTO pending_premium_report (user_id, granted_at) VALUES (?, ?)", (user_id, datetime.now().isoformat()))
         await db.commit()
 
 async def clear_pending_premium(user_id):
@@ -616,8 +510,7 @@ async def clear_pending_premium(user_id):
 async def is_eternal_premium(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT 1 FROM eternal_premium_users WHERE user_id=?", (user_id,)) as cursor:
-            row = await cursor.fetchone()
-    return row is not None
+            return (await cursor.fetchone()) is not None
 
 async def give_eternal_premium(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -625,11 +518,9 @@ async def give_eternal_premium(user_id):
         await db.commit()
 
 async def get_user_prefix(user_id):
-    plat = await is_platinum(user_id)
-    vip = await is_vip(user_id)
-    if plat:
+    if await is_platinum(user_id):
         return "💠"
-    if vip:
+    if await is_vip(user_id):
         return "👑"
     return ""
 
@@ -667,14 +558,12 @@ async def get_user_id_by_nick(nickname):
 async def is_banned(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT until FROM bans WHERE user_id=? AND (until IS NULL OR until > ?)", (user_id, datetime.now())) as cursor:
-            row = await cursor.fetchone()
-    return row is not None
+            return (await cursor.fetchone()) is not None
 
 async def is_muted(user_id):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT until FROM mutes WHERE user_id=? AND until > ?", (user_id, datetime.now())) as cursor:
-            row = await cursor.fetchone()
-    return row is not None
+            return (await cursor.fetchone()) is not None
 
 async def check_ban_and_mute(message: types.Message):
     user_id = message.from_user.id
@@ -768,45 +657,29 @@ async def auto_battle(user_id, result):
     psl2, sym2, _, _ = opponent_score
     if psl1 > psl2:
         winner_id, loser_id = user_id, opponent_id
-        wp, lp = psl1, psl2
     elif psl2 > psl1:
         winner_id, loser_id = opponent_id, user_id
-        wp, lp = psl2, psl1
     else:
         if sym1 > sym2:
             winner_id, loser_id = user_id, opponent_id
-            wp, lp = psl1, psl2
         elif sym2 > sym1:
             winner_id, loser_id = opponent_id, user_id
-            wp, lp = psl2, psl1
         else:
             return
     new_winner_elo, new_loser_elo, old_winner_elo, old_loser_elo = await update_elo_and_stats(winner_id, loser_id)
     winner_nick = await get_nickname(winner_id)
     loser_nick = await get_nickname(loser_id)
     try:
-        await bot.send_message(user_id, f"⚔️ **Автоматический батл завершён!**\n{'🏆 Ты победил!' if winner_id == user_id else '💀 Ты проиграл...'}\nСоперник: {winner_nick if winner_id != user_id else loser_nick}\nPSL соперника: {psl2 if opponent_id != user_id else psl1}\nТвой рейтинг: {old_winner_elo if winner_id == user_id else old_loser_elo} → {new_winner_elo if winner_id == user_id else new_loser_elo}")
+        await bot.send_message(user_id, f"⚔️ **Автобатл!**\n{'🏆 Победа!' if winner_id == user_id else '💀 Поражение'}\nСоперник: {winner_nick if winner_id != user_id else loser_nick}\nРейтинг: {old_winner_elo if winner_id == user_id else old_loser_elo} → {new_winner_elo if winner_id == user_id else new_loser_elo}")
     except:
         pass
     if opponent_id != user_id:
         try:
-            await bot.send_message(opponent_id, f"⚔️ **Автоматический батл!**\n{'🏆 Ты победил!' if winner_id == opponent_id else '💀 Ты проиграл...'}\nСоперник: {await get_nickname(user_id)}\nТвой рейтинг: {old_winner_elo if winner_id == opponent_id else old_loser_elo} → {new_winner_elo if winner_id == opponent_id else new_loser_elo}")
+            await bot.send_message(opponent_id, f"⚔️ **Автобатл!**\n{'🏆 Победа!' if winner_id == opponent_id else '💀 Поражение'}\nСоперник: {await get_nickname(user_id)}\nРейтинг: {old_winner_elo if winner_id == opponent_id else old_loser_elo} → {new_winner_elo if winner_id == opponent_id else new_loser_elo}")
         except:
             pass
 
-GUIDE_TEXT = """
-📖 **КНИГА ЛУКСМАКСИНГА**
-
-1. Симметрия: сон на спине, осанка, facial yoga.
-2. Межглазное расстояние: форма бровей, макияж.
-3. Пропорции носа: контуринг, макияж.
-4. Рот: визуальная коррекция губами/бородой.
-5. Челюсть: mewing, жевание твёрдой пищи, дыхание носом.
-6. Вертикальные пропорции: причёска, борода.
-7. Наклон глаз: упражнения, массаж.
-
-_Не медицинская рекомендация._
-"""
+GUIDE_TEXT = "📖 **КНИГА ЛУКСМАКСИНГА**\n\n1. Симметрия: сон на спине, осанка, facial yoga.\n2. Межглазное расстояние: форма бровей, макияж.\n3. Пропорции носа: контуринг, макияж.\n4. Рот: визуальная коррекция губами/бородой.\n5. Челюсть: mewing, жевание твёрдой пищи, дыхание носом.\n6. Вертикальные пропорции: причёска, борода.\n7. Наклон глаз: упражнения, массаж.\n\n_Не медицинская рекомендация._"
 
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
@@ -822,14 +695,11 @@ async def start_cmd(message: types.Message, state: FSMContext):
                 registered = await register_referral(user_id, referrer_id)
                 if registered:
                     try:
-                        await bot.send_message(referrer_id,
-                            f"👥 По твоей реферальной ссылке зашёл новый пользователь!\n"
-                            f"Как только он пройдёт анализ лица — ты получишь **+150 монет** 🪙")
+                        await bot.send_message(referrer_id, "👥 По твоей реферальной ссылке зашёл новый пользователь!")
                     except:
                         pass
         except (ValueError, TypeError):
             pass
-
     nick = await get_nickname(user_id)
     if nick:
         await add_coins(user_id, 0)
@@ -891,34 +761,15 @@ async def my_profile_cmd(message: types.Message):
         status_line = f"\n👑 **VIP** до {exp_str}"
     cat = f" | {get_psl_category(info['last_psl'])}" if info['last_psl'] else ""
     await message.answer(
-        f"👤 Ник: **{prefix}{info['nickname']}**\n"
-        f"🏅 Рейтинг Elo: **{info['elo']}**\n"
-        f"🏆 Победы: {info['wins']} | 💀 Поражения: {info['losses']}\n" +
-        (f"📊 Последний PSL: {info['last_psl']:.1f}/8.0{cat}" if info['last_psl'] else "Нет оценок") +
-        status_line,
+        f"👤 Ник: **{prefix}{info['nickname']}**\n🏅 Рейтинг Elo: **{info['elo']}**\n🏆 Победы: {info['wins']} | 💀 Поражения: {info['losses']}\n" +
+        (f"📊 Последний PSL: {info['last_psl']:.1f}/8.0{cat}" if info['last_psl'] else "Нет оценок") + status_line,
         reply_markup=get_main_keyboard()
     )
 
 @dp.message(Command("help"))
 async def help_cmd(message: types.Message):
     await message.answer(
-        "ℹ️ **Команды:**\n"
-        "/start — регистрация / профиль\n"
-        "/setnick — сменить ник\n"
-        "/myprofile — показать профиль\n"
-        "/help — это сообщение\n"
-        "/guide — книга луксмаксинга\n"
-        "/progress — твои замеры\n"
-        "/top — топ по рейтингу (40 человек)\n"
-        "/rank — твой рейтинг Elo\n"
-        "/battle <ник> — дуэль\n"
-        "/coins — твои монеты\n"
-        "/shop — магазин монет\n"
-        "/quests — текущие квесты\n"
-        "/stars — магазин Telegram Stars ⭐\n"
-        "/check_subscription — подтвердить подписку\n\n"
-        "⚙️ **Админы:**\n"
-        "/ban, /unban, /mute, /unmute, /warn, /unwarn, /check, /banlist, /mutelist, /resetelo, /addelo, /broadcast",
+        "ℹ️ **Команды:**\n/start — регистрация / профиль\n/setnick — сменить ник\n/myprofile — профиль\n/help — это сообщение\n/guide — книга луксмаксинга\n/progress — замеры\n/top — топ (40 чел)\n/rank — рейтинг\n/battle <ник> — дуэль\n/coins — монеты\n/shop — магазин\n/quests — квесты\n/stars — Telegram Stars ⭐\n/check_subscription — подписка\n\n⚙️ **Админы:**\n/ban, /unban, /mute, /unmute, /warn, /unwarn, /check, /banlist, /mutelist, /resetelo, /addelo, /broadcast",
         reply_markup=get_main_keyboard()
     )
 
@@ -945,16 +796,7 @@ async def coins_cmd(message: types.Message):
 
 @dp.message(Command("shop"))
 async def shop_cmd(message: types.Message):
-    await message.answer(
-        "🛒 **Магазин монет**\n\n"
-        "💰 100 Elo = 500 монет\n"
-        "💰 200 Elo = 900 монет\n"
-        "💰 500 Elo = 2000 монет\n\n"
-        "Для покупки введи: /buy elo <количество>\n"
-        "Пример: /buy elo 100\n\n"
-        "⭐ За Telegram Stars — /stars",
-        reply_markup=get_main_keyboard()
-    )
+    await message.answer("🛒 **Магазин монет**\n\n💰 100 Elo = 500 монет\n💰 200 Elo = 900 монет\n💰 500 Elo = 2000 монет\n\nДля покупки: /buy elo <кол-во>\n⭐ За Stars — /stars", reply_markup=get_main_keyboard())
 
 @dp.message(Command("buy"))
 async def buy_cmd(message: types.Message):
@@ -974,23 +816,23 @@ async def buy_cmd(message: types.Message):
     price = prices[amount]
     if await spend_coins(message.from_user.id, price):
         await add_elo(message.from_user.id, amount)
-        await message.answer(f"✅ Вы купили {amount} Elo за {price} монет. Ваш рейтинг увеличен!", reply_markup=get_main_keyboard())
+        await message.answer(f"✅ Купил {amount} Elo за {price} монет!", reply_markup=get_main_keyboard())
     else:
-        await message.answer(f"❌ Недостаточно монет. Нужно {price} монет.", reply_markup=get_main_keyboard())
+        await message.answer(f"❌ Недостаточно монет. Нужно {price}.", reply_markup=get_main_keyboard())
 
 @dp.message(Command("quests"))
 async def quests_cmd(message: types.Message):
     if not current_quests:
         await message.answer("Квесты загружаются, попробуйте через минуту.", reply_markup=get_main_keyboard())
         return
-    text = "📋 **Активные квесты (обновятся через 5 минут)**\n\n"
+    text = "📋 **Активные квесты**\n\n"
     user_id = message.from_user.id
     vip = await is_vip(user_id) or await is_platinum(user_id)
     for q in current_quests:
         reward = int(q['reward'] * 1.5) if vip else q['reward']
         bonus = " _(x1.5 VIP)_" if vip else ""
-        text += f"• {q['desc']} — награда {reward} 🪙{bonus}\n"
-    text += "\nПросто выполняй действия — награда зачислится автоматически!"
+        text += f"• {q['desc']} — {reward} 🪙{bonus}\n"
+    text += "\nНаграда зачисляется автоматически!"
     await message.answer(text, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(Command("check_subscription"))
@@ -1003,46 +845,26 @@ async def check_subscription_cmd(message: types.Message):
             if chat_member.status not in ('member', 'administrator', 'creator'):
                 missing.append(channel)
         except Exception as e:
-            logging.error(f"Ошибка проверки канала {channel} для {user_id}: {e}")
+            logging.error(f"Channel check error {channel}: {e}")
             missing.append(channel)
     if not missing:
-        await message.answer("✅ Подписка на все каналы подтверждена! Теперь вы можете пользоваться ботом.", reply_markup=get_main_keyboard())
+        await message.answer("✅ Подписка подтверждена!", reply_markup=get_main_keyboard())
     else:
         builder = InlineKeyboardBuilder()
         for ch in missing:
-            builder.add(types.InlineKeyboardButton(text=f"📢 Подписаться на {ch}", url=f"https://t.me/{ch.lstrip('@')}"))
+            builder.add(types.InlineKeyboardButton(text=f"📢 {ch}", url=f"https://t.me/{ch.lstrip('@')}"))
         builder.adjust(1)
-        await message.answer(f"❌ Вы не подписаны на следующие каналы:\n" + "\n".join(f"• {ch}" for ch in missing) + "\n\nПодпишитесь и нажмите /check_subscription снова.", reply_markup=builder.as_markup())
+        await message.answer("❌ Подпишись на каналы:\n" + "\n".join(f"• {ch}" for ch in missing), reply_markup=builder.as_markup())
 
 @dp.message(Command("stars"))
 async def stars_shop_cmd(message: types.Message):
     if not await check_ban_and_mute(message):
         return
     builder = InlineKeyboardBuilder()
-    builder.add(types.InlineKeyboardButton(text="💎 Premium-отчёт — 1 ⭐", callback_data="buy_stars:premium_report"))
-    builder.add(types.InlineKeyboardButton(text="👑 VIP 30 дней — 99 ⭐", callback_data="buy_stars:vip_30"))
-    builder.add(types.InlineKeyboardButton(text="🪙 1000 монет — 25 ⭐", callback_data="buy_stars:coins_pack"))
-    builder.add(types.InlineKeyboardButton(text="🚀 ELO Буст +300 — 75 ⭐", callback_data="buy_stars:elo_boost"))
-    builder.add(types.InlineKeyboardButton(text="💠 Платиновый ник навсегда — 150 ⭐", callback_data="buy_stars:platinum_nick"))
-    builder.add(types.InlineKeyboardButton(text="♾ Вечный Premium-отчёт — 88 ⭐", callback_data="buy_stars:eternal_premium"))
+    for key, item in STARS_SHOP.items():
+        builder.add(types.InlineKeyboardButton(text=f"{item['title']} — {item['stars']} ⭐", callback_data=f"buy_stars:{key}"))
     builder.adjust(1)
-    text = (
-        "⭐ **Магазин Telegram Stars**\n\n"
-        "💎 **Premium-отчёт** — 1 ⭐\n"
-        "Расширенный анализ: перцентиль, сравнение с идеалом, потенциал роста _(одноразовый)_\n\n"
-        "♾ **Вечный Premium-отчёт** — 88 ⭐\n"
-        "Каждый анализ — всегда в Premium-формате. Навсегда, без доплат\n\n"
-        "👑 **VIP на 30 дней** — 99 ⭐\n"
-        "Значок 👑 в профиле и топе, x1.5 монет за квесты, +200 монет ежедневно\n\n"
-        "🪙 **1000 монет** — 25 ⭐\n"
-        "Быстрое пополнение для магазина\n\n"
-        "🚀 **ELO Буст +300** — 75 ⭐\n"
-        "Мгновенный прыжок в рейтинге\n\n"
-        "💠 **Платиновый ник навсегда** — 150 ⭐\n"
-        "Вечный значок 💠, такой же бонус как VIP, но навсегда\n\n"
-        "Выбери товар:"
-    )
-    await message.answer(text, parse_mode="Markdown", reply_markup=builder.as_markup())
+    await message.answer("⭐ **Магазин Telegram Stars**\n\nВыбери товар:", parse_mode="Markdown", reply_markup=builder.as_markup())
 
 @dp.callback_query(F.data.startswith("buy_stars:"))
 async def buy_stars_callback(callback: types.CallbackQuery):
@@ -1053,19 +875,11 @@ async def buy_stars_callback(callback: types.CallbackQuery):
         return
     try:
         prices = [LabeledPrice(label=item["title"], amount=item["stars"])]
-        await bot.send_invoice(
-            chat_id=callback.from_user.id,
-            title=item["title"],
-            description=item["description"],
-            payload=item_key,
-            provider_token="",
-            currency="XTR",
-            prices=prices,
-        )
+        await bot.send_invoice(chat_id=callback.from_user.id, title=item["title"], description=item["description"], payload=item_key, provider_token="", currency="XTR", prices=prices)
         await callback.answer()
     except Exception as e:
-        logging.error(f"Ошибка отправки инвойса: {e}")
-        await callback.answer("Ошибка при создании платежа. Попробуйте позже.", show_alert=True)
+        logging.error(f"Invoice error: {e}")
+        await callback.answer("Ошибка", show_alert=True)
 
 @dp.pre_checkout_query()
 async def pre_checkout_handler(query: types.PreCheckoutQuery):
@@ -1075,70 +889,29 @@ async def pre_checkout_handler(query: types.PreCheckoutQuery):
 async def successful_payment_handler(message: types.Message):
     payload = message.successful_payment.invoice_payload
     user_id = message.from_user.id
-    stars = message.successful_payment.total_amount
-    nick = await get_nickname(user_id) or str(user_id)
-
-    logging.info(f"Stars payment: user={user_id} nick={nick} payload={payload} stars={stars}")
 
     if payload == "premium_report":
         await set_pending_premium(user_id)
-        await message.answer(
-            "💎 **Premium-отчёт активирован!**\n\n"
-            "Теперь отправь своё фото — я сделаю расширенный анализ с перцентилем и потенциалом улучшения.",
-            reply_markup=get_main_keyboard()
-        )
+        await message.answer("💎 Premium-отчёт активирован! Отправь фото.", reply_markup=get_main_keyboard())
     elif payload == "vip_30":
         await give_vip(user_id, 30)
-        await message.answer(
-            "👑 **VIP-статус активирован на 30 дней!**\n\n"
-            "• Значок 👑 в профиле и топе\n"
-            "• x1.5 монет за квесты\n"
-            "• +200 монет ежедневно (заходи за бонусом!)\n\n"
-            "Луксмакси по VIP-программе, красавчик! 🔥",
-            reply_markup=get_main_keyboard()
-        )
+        await message.answer("👑 VIP на 30 дней активирован!", reply_markup=get_main_keyboard())
     elif payload == "coins_pack":
         await add_coins(user_id, 1000)
         coins = await get_coins(user_id)
-        await message.answer(
-            f"🪙 **+1000 монет зачислено!**\n\nТвой баланс: **{coins}** монет\n\nИди трать в /shop 😎",
-            reply_markup=get_main_keyboard()
-        )
+        await message.answer(f"🪙 +1000 монет! Баланс: **{coins}**", reply_markup=get_main_keyboard())
     elif payload == "elo_boost":
         old_elo = await get_elo(user_id)
         await add_elo(user_id, 300)
-        new_elo = old_elo + 300
-        await message.answer(
-            f"🚀 **ELO Буст активирован!**\n\n"
-            f"Рейтинг: {old_elo} → **{new_elo}** (+300)\n\n"
-            f"Залетай в /top и смотри где ты теперь! 👀",
-            reply_markup=get_main_keyboard()
-        )
+        await message.answer(f"🚀 +300 Elo! {old_elo} → **{old_elo+300}**", reply_markup=get_main_keyboard())
     elif payload == "platinum_nick":
         await give_platinum(user_id)
         if not await is_vip(user_id):
             await give_vip(user_id, 36500)
-        await message.answer(
-            "💠 **Платиновый статус получен навсегда!**\n\n"
-            "• Значок 💠 в профиле и топе — навсегда\n"
-            "• Все VIP-бонусы включены навсегда\n"
-            "• x1.5 монет за квесты\n"
-            "• +200 монет ежедневно\n\n"
-            "Ты теперь легенда этого бота. Без вопросов. 💠",
-            reply_markup=get_main_keyboard()
-        )
+        await message.answer("💠 Платиновый статус навсегда!", reply_markup=get_main_keyboard())
     elif payload == "eternal_premium":
         await give_eternal_premium(user_id)
-        await message.answer(
-            "♾ **Вечный Premium-отчёт активирован!**\n\n"
-            "Теперь каждый анализ лица будет в Premium-формате:\n"
-            "• 📈 Перцентиль среди всех пользователей\n"
-            "• 🚀 Потенциальный PSL при прокачке\n"
-            "• 📊 Детальный разбор каждой метрики vs идеал\n"
-            "• 🎯 Персональные приоритеты улучшения\n\n"
-            "Навсегда. Без доплат. Просто отправляй фото 📸",
-            reply_markup=get_main_keyboard()
-        )
+        await message.answer("♾ Вечный Premium активирован!", reply_markup=get_main_keyboard())
 
 @dp.message(F.text.lower() == "🔍 оценить лицо")
 async def button_evaluate(message: types.Message):
@@ -1147,18 +920,16 @@ async def button_evaluate(message: types.Message):
     nick = await require_nickname(message)
     if not nick:
         return
-    pending = await has_pending_premium(message.from_user.id)
-    if pending:
-        await message.answer("📸 У тебя активирован **💎 Premium-отчёт**! Отправь фото анфас — получишь расширенный анализ.", reply_markup=get_main_keyboard())
+    if await has_pending_premium(message.from_user.id):
+        await message.answer("📸 Premium-режим! Отправь фото анфас.", reply_markup=get_main_keyboard())
     else:
-        await message.answer("📸 Отправь своё фото анфас (чёткое, без очков).", reply_markup=get_main_keyboard())
+        await message.answer("📸 Отправь фото анфас (чёткое, без очков).", reply_markup=get_main_keyboard())
 
 @dp.message(F.text.lower() == "⚔️ батл")
 async def button_battle(message: types.Message, state: FSMContext):
     if not await check_ban_and_mute(message):
         return
-    nick = await require_nickname(message)
-    if not nick:
+    if not await require_nickname(message):
         return
     await message.answer("Введи ник противника:")
     await state.set_state(Battle.waiting_for_opponent)
@@ -1173,55 +944,49 @@ async def process_battle_opponent(message: types.Message, state: FSMContext):
     opponent_nick = message.text.strip()
     opponent_id = await get_user_id_by_nick(opponent_nick)
     if not opponent_id:
-        await message.answer(f"❌ Игрок с ником '{opponent_nick}' не найден.", reply_markup=get_main_keyboard())
+        await message.answer(f"❌ '{opponent_nick}' не найден.", reply_markup=get_main_keyboard())
         await state.clear()
         return
     challenger_id = message.from_user.id
     if challenger_id == opponent_id:
-        await message.answer("Нельзя вызвать самого себя 😏", reply_markup=get_main_keyboard())
+        await message.answer("Нельзя вызвать себя 😏", reply_markup=get_main_keyboard())
         await state.clear()
         return
-    challenger_score = await get_last_score(challenger_id)
-    opponent_score = await get_last_score(opponent_id)
-    if not challenger_score:
-        await message.answer("Сначала оцени своё лицо, отправив фото!", reply_markup=get_main_keyboard())
+    cs = await get_last_score(challenger_id)
+    os_ = await get_last_score(opponent_id)
+    if not cs:
+        await message.answer("Сначала оцени лицо!", reply_markup=get_main_keyboard())
         await state.clear()
         return
-    if not opponent_score:
-        await message.answer(f"Игрок {opponent_nick} ещё не делал замеров.", reply_markup=get_main_keyboard())
+    if not os_:
+        await message.answer(f"{opponent_nick} ещё не делал замеров.", reply_markup=get_main_keyboard())
         await state.clear()
         return
-    psl1, sym1, _, _ = challenger_score
-    psl2, sym2, _, _ = opponent_score
+    psl1, sym1, _, _ = cs
+    psl2, sym2, _, _ = os_
     if psl1 > psl2:
-        winner_id, loser_id = challenger_id, opponent_id
-        winner_nick, loser_nick = challenger_nick, opponent_nick
+        w, l = challenger_id, opponent_id
+        wn, ln = challenger_nick, opponent_nick
         wp, lp = psl1, psl2
     elif psl2 > psl1:
-        winner_id, loser_id = opponent_id, challenger_id
-        winner_nick, loser_nick = opponent_nick, challenger_nick
+        w, l = opponent_id, challenger_id
+        wn, ln = opponent_nick, challenger_nick
         wp, lp = psl2, psl1
     else:
-        if sym1 > sym2:
-            winner_id, loser_id = challenger_id, opponent_id
-            winner_nick, loser_nick = challenger_nick, opponent_nick
+        if sym1 >= sym2:
+            w, l = challenger_id, opponent_id
+            wn, ln = challenger_nick, opponent_nick
             wp, lp = psl1, psl2
-        elif sym2 > sym1:
-            winner_id, loser_id = opponent_id, challenger_id
-            winner_nick, loser_nick = opponent_nick, challenger_nick
-            wp, lp = psl2, psl1
         else:
-            await message.answer(f"🔥 Ничья! У обоих PSL {psl1:.1f} и симметрия равны.", reply_markup=get_main_keyboard())
-            await state.clear()
-            return
-    new_winner_elo, new_loser_elo, old_winner_elo, old_loser_elo = await update_elo_and_stats(winner_id, loser_id)
-    await message.answer(f"⚔️ **Дуэль завершена!**\n🏆 Победитель: **{winner_nick}** (PSL {wp:.1f})\n💀 Проигравший: **{loser_nick}** (PSL {lp:.1f})\n\n📊 Рейтинг победителя: {old_winner_elo} → **{new_winner_elo}** (+{new_winner_elo - old_winner_elo})\n📊 Рейтинг проигравшего: {old_loser_elo} → **{new_loser_elo}** ({new_loser_elo - old_loser_elo})", reply_markup=get_main_keyboard())
-    if winner_id == challenger_id:
+            w, l = opponent_id, challenger_id
+            wn, ln = opponent_nick, challenger_nick
+            wp, lp = psl2, psl1
+    nw, nl, ow, ol = await update_elo_and_stats(w, l)
+    await message.answer(f"⚔️ **Дуэль!**\n🏆 {wn} ({wp:.1f}) vs 💀 {ln} ({lp:.1f})\n\nРейтинг: {wn} {ow}→**{nw}** | {ln} {ol}→**{nl}**", reply_markup=get_main_keyboard())
+    if w == challenger_id:
         await check_and_award_quest(challenger_id, "battle_win")
-        await check_and_award_quest(challenger_id, "battle_win_count", increment=1)
     else:
         await check_and_award_quest(opponent_id, "battle_win")
-        await check_and_award_quest(opponent_id, "battle_win_count", increment=1)
     await state.clear()
 
 @dp.message(F.text.lower() == "👤 мой профиль")
@@ -1277,66 +1042,48 @@ async def ref_cmd(message: types.Message):
         return
     user_id = message.from_user.id
     bot_info = await bot.get_me()
-    bot_username = bot_info.username
-    ref_link = f"https://t.me/{bot_username}?start=ref_{user_id}"
+    ref_link = f"https://t.me/{bot_info.username}?start=ref_{user_id}"
     total, rewarded = await get_ref_count(user_id)
-    earned = rewarded * 150
-    await message.answer(
-        f"🔗 **Реферальная программа**\n\n"
-        f"Приглашай друзей по своей ссылке:\n"
-        f"`{ref_link}`\n\n"
-        f"💰 **Награда:** +150 монет за каждого, кто пройдёт анализ лица\n\n"
-        f"📊 **Твоя статистика:**\n"
-        f"• Приглашено: **{total}** чел.\n"
-        f"• Активированных (прошли анализ): **{rewarded}** чел.\n"
-        f"• Всего заработано: **{earned}** 🪙\n\n"
-        f"_Делись ссылкой — зарабатывай монеты без лимита!_",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
+    await message.answer(f"🔗 **Рефералы**\n\nСсылка: `{ref_link}`\n\n💰 +150 🪙 за активного реферала\n📊 Приглашено: **{total}** | Активных: **{rewarded}**", parse_mode="Markdown", reply_markup=get_main_keyboard())
 
 @dp.message(F.text.lower() == "📢 рассылка")
 async def button_broadcast(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
-        await message.answer("⛔ Недостаточно прав для рассылки.")
+        await message.answer("⛔ Недостаточно прав.")
         return
-    await message.answer("Введите текст для рассылки всем пользователям:")
+    await message.answer("Введите текст для рассылки:")
     await state.set_state(Broadcast.waiting_for_text)
 
 @dp.message(Command("broadcast"))
 async def broadcast_cmd(message: types.Message, state: FSMContext):
     if not await admin_required(message):
         return
-    await message.answer("Введите текст для рассылки всем пользователям:")
+    await message.answer("Введите текст для рассылки:")
     await state.set_state(Broadcast.waiting_for_text)
 
 @dp.message(Broadcast.waiting_for_text)
 async def process_broadcast_text(message: types.Message, state: FSMContext):
     if not is_admin(message.from_user.id):
-        await message.answer("⛔ Недостаточно прав.")
         await state.clear()
         return
     text = message.text.strip()
     if not text:
-        await message.answer("Текст не может быть пустым.")
         return
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT user_id FROM users") as cursor:
             users = await cursor.fetchall()
-    sent = 0
-    failed = 0
-    for (user_id,) in users:
+    sent, failed = 0, 0
+    for (uid,) in users:
         try:
-            await bot.send_message(user_id, text)
+            await bot.send_message(uid, text)
             sent += 1
-        except Exception as e:
+        except:
             failed += 1
-            logging.warning(f"Не удалось отправить сообщение {user_id}: {e}")
         await asyncio.sleep(0.05)
-    await message.answer(f"✅ Рассылка завершена.\nОтправлено: {sent}\nНе удалось: {failed}", reply_markup=get_main_keyboard())
+    await message.answer(f"✅ Рассылка: {sent} отправлено, {failed} ошибок", reply_markup=get_main_keyboard())
     await state.clear()
 
-async def send_premium_report(message: types.Message, nick: str, result: dict):
+async def send_premium_report(message, nick, result):
     user_id = message.from_user.id
     psl = result['psl']
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1345,58 +1092,23 @@ async def send_premium_report(message: types.Message, nick: str, result: dict):
         async with db.execute("SELECT COUNT(*) FROM scores") as cur:
             total = (await cur.fetchone())[0]
     percentile = round((below / total * 100)) if total > 0 else 50
-
     raw = result['raw_scores']
-    boosted_scores = {k: min(v + 0.2, 1.0) for k, v in raw.items()}
-    potential_raw = (
-        boosted_scores['symmetry'] * 0.25 +
-        boosted_scores['ipd'] * 0.15 +
-        boosted_scores['nose'] * 0.1 +
-        boosted_scores['mouth'] * 0.1 +
-        boosted_scores['jaw'] * 0.15 +
-        boosted_scores['gold_vert'] * 0.1 +
-        boosted_scores['gold_horiz'] * 0.05 +
-        boosted_scores['tilt'] * 0.1
-    ) * 7 + 1
+    boosted = {k: min(v + 0.2, 1.0) for k, v in raw.items()}
+    potential_raw = (boosted['symmetry']*0.25 + boosted['ipd']*0.15 + boosted['nose']*0.1 + boosted['mouth']*0.1 + boosted['jaw']*0.15 + boosted['gold_vert']*0.1 + boosted['gold_horiz']*0.05 + boosted['tilt']*0.1) * 7 + 1
     potential_psl = round(min(max(potential_raw, 1.0), 8.0), 1)
-
-    def bar(score, ideal=100):
-        filled = round(score / 10)
-        return "█" * filled + "░" * (10 - filled)
-
-    ideal_gaps = []
-    metrics = [
-        ("Симметрия", result['symmetry'], 92),
-        ("Межзрачковое", result['ipd_score'], 90),
-        ("Пропорция носа", result['nose_width_score'], 85),
-        ("Ширина рта", result['mouth_score'], 88),
-        ("Челюсть", result['jaw'], 90),
-        ("Золотое сечение ↕", result['gold_vert'], 80),
-        ("Пропорция глаз ↔", result['gold_horiz'], 80),
-        ("Наклон глаз", result['tilt_score'], 85),
-    ]
-    metrics_text = ""
+    def bar(s):
+        return "█" * round(s/10) + "░" * (10 - round(s/10))
+    metrics = [("Симметрия", result['symmetry'], 92), ("Межзрачковое", result['ipd_score'], 90), ("Нос", result['nose_width_score'], 85), ("Рот", result['mouth_score'], 88), ("Челюсть", result['jaw'], 90), ("Золотое ↕", result['gold_vert'], 80), ("Глаза ↔", result['gold_horiz'], 80), ("Наклон", result['tilt_score'], 85)]
+    mt = ""
+    gaps = []
     for name, score, ideal in metrics:
         gap = ideal - score
         status = "✅" if gap <= 5 else ("⚠️" if gap <= 20 else "❌")
-        metrics_text += f"{status} {name}: {score}% {bar(score)} (идеал ~{ideal}%)\n"
+        mt += f"{status} {name}: {score}% {bar(score)} (~{ideal}%)\n"
         if gap > 15:
-            ideal_gaps.append(name)
-
-    priority_text = ""
-    if ideal_gaps:
-        priority_text = f"\n🎯 **Приоритет для улучшения:**\n" + "\n".join(f"• {m}" for m in ideal_gaps[:3])
-
-    report = (
-        f"💎 **PREMIUM-ОТЧЁТ: {nick}**\n\n"
-        f"🏆 **PSL: {psl}/8.0** — {get_psl_category(psl)}\n"
-        f"📈 **Ты лучше {percentile}% пользователей бота**\n"
-        f"🚀 **Твой потенциал при прокачке: до {potential_psl}/8.0**\n\n"
-        f"📊 **Детальный разбор vs идеал:**\n{metrics_text}"
-        f"{priority_text}\n\n"
-        f"💡 **Советы по прокачке:**\n" + "\n".join(result['tips']) + "\n\n"
-        f"_Этот отчёт сгенерирован Premium-анализом_ 💎"
-    )
+            gaps.append(name)
+    pt = f"\n🎯 **Приоритет:**\n" + "\n".join(f"• {m}" for m in gaps[:3]) if gaps else ""
+    report = f"💎 **PREMIUM: {nick}**\n\n🏆 PSL: **{psl}/8.0** ({get_psl_category(psl)})\n📈 Лучше **{percentile}%** юзеров\n🚀 Потенциал: до **{potential_psl}/8.0**\n\n📊 {mt}{pt}\n\n💡 " + "\n".join(result['tips']) + "\n\n_Premium-анализ 💎_"
     await message.answer(report, parse_mode="Markdown", reply_markup=get_main_keyboard())
     if not await is_eternal_premium(user_id):
         await clear_pending_premium(user_id)
@@ -1408,17 +1120,13 @@ async def handle_photo(message: types.Message):
     nick = await require_nickname(message)
     if not nick:
         return
-
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     file_bytes = await bot.download_file(file.file_path)
     img_bytes = file_bytes.read()
 
-    is_premium_mode = await has_pending_premium(message.from_user.id) or await is_eternal_premium(message.from_user.id)
-    if is_premium_mode:
-        await message.answer("💎 Запускаю Premium-анализ...", reply_markup=get_main_keyboard())
-    else:
-        await message.answer("🔍 Анализирую лицо...", reply_markup=get_main_keyboard())
+    is_premium = await has_pending_premium(message.from_user.id) or await is_eternal_premium(message.from_user.id)
+    await message.answer("🔍 Анализирую лицо..." if not is_premium else "💎 Premium-анализ...", reply_markup=get_main_keyboard())
 
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, analyze_face, img_bytes)
@@ -1427,26 +1135,14 @@ async def handle_photo(message: types.Message):
         await message.answer(f"❌ {result['error']}", reply_markup=get_main_keyboard())
         return
 
-    annotated_bytes = result['annotated_image'].getvalue()
-    await message.answer_photo(BufferedInputFile(annotated_bytes, filename="face_analysis.jpg"), caption="🔍 Разметка лица")
+    annotated = result['annotated_image'].getvalue()
+    await message.answer_photo(BufferedInputFile(annotated, filename="face.jpg"), caption="🔍 Разметка лица")
 
-    if is_premium_mode:
+    if is_premium:
         await send_premium_report(message, nick, result)
     else:
-        roast = generate_roast(result['psl'], result['canthal_tilt'], result['symmetry'])
-        category = get_psl_category(result['psl'])
         tips_text = "\n".join(result['tips'])
-        report = (f"🎯 **{nick}, твой PSL: {result['psl']} / 8.0** ({category})\n\n"
-                  f"📊 Симметрия: {result['symmetry']}%\n"
-                  f"📊 Межзрачковое расстояние: {result['ipd_score']}%\n"
-                  f"📊 Пропорция носа: {result['nose_width_score']}%\n"
-                  f"📊 Ширина рта: {result['mouth_score']}%\n"
-                  f"📊 Челюсть: {result['jaw']}%\n"
-                  f"📊 Золотое сечение (верт.): {result['gold_vert']}%\n"
-                  f"📊 Пропорция глаз (гор.): {result['gold_horiz']}%\n"
-                  f"📊 Наклон глаз: {result['canthal_tilt']}° ({result['tilt_score']}%)\n\n"
-                  f"🛠 Советы:\n{tips_text}\n\n"
-                  f"💎 _Хочешь детальный отчёт с перцентилем и потенциалом? /stars_")
+        report = f"🎯 **{nick}, PSL: {result['psl']}/8.0** ({get_psl_category(result['psl'])})\n\n📊 Симметрия: {result['symmetry']}%\n📊 Межглазное: {result['ipd_score']}%\n📊 Нос: {result['nose_width_score']}%\n📊 Рот: {result['mouth_score']}%\n📊 Челюсть: {result['jaw']}%\n📊 Золотое ↕: {result['gold_vert']}%\n📊 Глаза ↔: {result['gold_horiz']}%\n📊 Наклон: {result['canthal_tilt']}° ({result['tilt_score']}%)\n\n🛠 {tips_text}\n\n💎 _Детальный отчёт: /stars_"
         await message.answer(report, parse_mode="Markdown", reply_markup=get_main_keyboard())
 
     await save_score(message.from_user.id, result)
@@ -1458,53 +1154,50 @@ async def handle_photo(message: types.Message):
         await check_and_award_quest(message.from_user.id, "symmetry", value=result['symmetry'])
     asyncio.create_task(auto_battle(message.from_user.id, result))
     asyncio.create_task(try_reward_referrer(message.from_user.id))
-
     if LOG_CHAT_ID:
         try:
-            await bot.send_photo(LOG_CHAT_ID, photo=BufferedInputFile(img_bytes, filename="user_photo.jpg"), caption=f"📷 Пользователь **{nick}** (ID: {message.from_user.id})\nPSL: {result['psl']}, симметрия: {result['symmetry']}%\n#лог")
-        except Exception as e:
-            logging.error(f"Не удалось отправить фото в лог-чат: {e}")
+            await bot.send_photo(LOG_CHAT_ID, photo=BufferedInputFile(img_bytes, filename="user.jpg"), caption=f"📷 {nick} | PSL: {result['psl']} | Sym: {result['symmetry']}%")
+        except:
+            pass
 
 @dp.message(Command("progress"))
 async def progress_cmd(message: types.Message):
     nick = await require_nickname(message)
     if not nick:
         return
-    user_id = message.from_user.id
     async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT psl, symmetry, date FROM scores WHERE user_id=? ORDER BY date DESC LIMIT 5", (user_id,)) as cursor:
+        async with db.execute("SELECT psl, symmetry, date FROM scores WHERE user_id=? ORDER BY date DESC LIMIT 5", (message.from_user.id,)) as cursor:
             rows = await cursor.fetchall()
     if not rows:
-        await message.answer("📭 У тебя пока нет замеров.", reply_markup=get_main_keyboard())
+        await message.answer("📭 Нет замеров.", reply_markup=get_main_keyboard())
         return
     rows = list(reversed(rows))
-    lines = [f"📅 {date}: PSL {psl}, симметрия {symmetry}%" for psl, symmetry, date in rows]
-    await message.answer(f"📈 **{nick}, твои последние замеры:**\n" + "\n".join(lines), reply_markup=get_main_keyboard())
+    lines = [f"📅 {d}: PSL {p}, sym {s}%" for p, s, d in rows]
+    await message.answer(f"📈 **{nick}:**\n" + "\n".join(lines), reply_markup=get_main_keyboard())
 
 @dp.message(Command("rank"))
 async def rank_cmd(message: types.Message):
     nick = await require_nickname(message)
     if not nick:
         return
-    user_id = message.from_user.id
-    elo = await get_elo(user_id)
+    elo = await get_elo(message.from_user.id)
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM users WHERE elo > ?", (elo,)) as cursor:
             rank = (await cursor.fetchone())[0] + 1
-    prefix = await get_user_prefix(user_id)
-    await message.answer(f"🏅 **{prefix}{nick}**, твой рейтинг: **{elo}** (место #{rank})", reply_markup=get_main_keyboard())
+    prefix = await get_user_prefix(message.from_user.id)
+    await message.answer(f"🏅 **{prefix}{nick}**: {elo} (место #{rank})", reply_markup=get_main_keyboard())
 
 @dp.message(Command("top"))
 async def top_cmd(message: types.Message):
     rows = await get_top_users_by_elo(40)
     if not rows:
-        await message.answer("Пока никто не участвовал в дуэлях.", reply_markup=get_main_keyboard())
+        await message.answer("Пока пусто.", reply_markup=get_main_keyboard())
         return
     lines = []
     for i, (nick, elo, uid) in enumerate(rows, 1):
         prefix = await get_user_prefix(uid)
         lines.append(f"{i}. {prefix}{nick} — {elo}")
-    await message.answer("🏆 **Топ игроков (Elo):**\n" + "\n".join(lines), reply_markup=get_main_keyboard())
+    await message.answer("🏆 **Топ:**\n" + "\n".join(lines), reply_markup=get_main_keyboard())
 
 @dp.message(Command("battle"))
 async def battle_cmd(message: types.Message):
@@ -1515,55 +1208,47 @@ async def battle_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("🎮 Используй: /battle <никнейм>", reply_markup=get_main_keyboard())
+        await message.answer("Используй: /battle <ник>", reply_markup=get_main_keyboard())
         return
     opponent_nick = args[1].strip()
     opponent_id = await get_user_id_by_nick(opponent_nick)
     if not opponent_id:
-        await message.answer(f"❌ Игрок с ником '{opponent_nick}' не найден.", reply_markup=get_main_keyboard())
+        await message.answer(f"❌ '{opponent_nick}' не найден.", reply_markup=get_main_keyboard())
         return
     challenger_id = message.from_user.id
-    if challenger_id == opponent_id:
-        await message.answer("Нельзя вызвать самого себя 😏", reply_markup=get_main_keyboard())
+    if challenger_id ==opponent_id:
+        await message.answer("Нельзя себя 😏", reply_markup=get_main_keyboard())
         return
-    challenger_score = await get_last_score(challenger_id)
-    opponent_score = await get_last_score(opponent_id)
-    if not challenger_score:
-        await message.answer("Сначала оцени своё лицо, отправив фото!", reply_markup=get_main_keyboard())
+    cs = await get_last_score(challenger_id)
+    os_ = await get_last_score(opponent_id)
+    if not cs:
+        await message.answer("Оцени лицо!", reply_markup=get_main_keyboard())
         return
-    if not opponent_score:
-        await message.answer(f"Игрок {opponent_nick} ещё не делал замеров.", reply_markup=get_main_keyboard())
+    if not os_:
+        await message.answer(f"{opponent_nick} без замеров.", reply_markup=get_main_keyboard())
         return
-    psl1, sym1, _, _ = challenger_score
-    psl2, sym2, _, _ = opponent_score
+    psl1, sym1, _, _ = cs
+    psl2, sym2, _, _ = os_
     if psl1 > psl2:
-        winner_id, loser_id = challenger_id, opponent_id
-        winner_nick, loser_nick = challenger_nick, opponent_nick
-        wp, lp = psl1, psl2
+        w, l = challenger_id, opponent_id
+        wn, ln = challenger_nick, opponent_nick
     elif psl2 > psl1:
-        winner_id, loser_id = opponent_id, challenger_id
-        winner_nick, loser_nick = opponent_nick, challenger_nick
-        wp, lp = psl2, psl1
+        w, l = opponent_id, challenger_id
+        wn, ln = opponent_nick, challenger_nick
+    elif sym1 >= sym2:
+        w, l = challenger_id, opponent_id
+        wn, ln = challenger_nick, opponent_nick
     else:
-        if sym1 > sym2:
-            winner_id, loser_id = challenger_id, opponent_id
-            winner_nick, loser_nick = challenger_nick, opponent_nick
-            wp, lp = psl1, psl2
-        elif sym2 > sym1:
-            winner_id, loser_id = opponent_id, challenger_id
-            winner_nick, loser_nick = opponent_nick, challenger_nick
-            wp, lp = psl2, psl1
-        else:
-            await message.answer(f"🔥 Ничья! У обоих PSL {psl1:.1f} и симметрия равны.", reply_markup=get_main_keyboard())
-            return
-    new_winner_elo, new_loser_elo, old_winner_elo, old_loser_elo = await update_elo_and_stats(winner_id, loser_id)
-    await message.answer(f"⚔️ **Дуэль завершена!**\n🏆 Победитель: **{winner_nick}** (PSL {wp:.1f})\n💀 Проигравший: **{loser_nick}** (PSL {lp:.1f})\n\n📊 Рейтинг победителя: {old_winner_elo} → **{new_winner_elo}** (+{new_winner_elo - old_winner_elo})\n📊 Рейтинг проигравшего: {old_loser_elo} → **{new_loser_elo}** ({new_loser_elo - old_loser_elo})", reply_markup=get_main_keyboard())
-    if winner_id == challenger_id:
+        w, l = opponent_id, challenger_id
+        wn, ln = opponent_nick, challenger_nick
+    nw, nl, ow, ol = await update_elo_and_stats(w, l)
+    wp_ = psl1 if w == challenger_id else psl2
+    lp_ = psl2 if w == challenger_id else psl1
+    await message.answer(f"⚔️ **{wn}** ({wp_:.1f}) vs **{ln}** ({lp_:.1f})\n🏆 {wn}: {ow}→**{nw}** | 💀 {ln}: {ol}→**{nl}**", reply_markup=get_main_keyboard())
+    if w == challenger_id:
         await check_and_award_quest(challenger_id, "battle_win")
-        await check_and_award_quest(challenger_id, "battle_win_count", increment=1)
     else:
         await check_and_award_quest(opponent_id, "battle_win")
-        await check_and_award_quest(opponent_id, "battle_win_count", increment=1)
 
 def is_admin(user_id):
     return user_id in ADMIN_IDS
@@ -1580,20 +1265,20 @@ async def ban_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=3)
     if len(args) < 3:
-        await message.answer("Использование: /ban <ник/ID> <минуты (0=навсегда)> <причина>")
+        await message.answer("/ban <ник/ID> <минуты> <причина>")
         return
     target = args[1]
     mins = int(args[2]) if args[2].isdigit() else 0
     reason = args[3] if len(args) > 3 else "Без причины"
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
+        await message.answer("Не найден.")
         return
     until = datetime.now() + timedelta(minutes=mins) if mins > 0 else None
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR REPLACE INTO bans (user_id, reason, until, banned_by) VALUES (?, ?, ?, ?)", (target_id, reason, until, message.from_user.id))
         await db.commit()
-    await message.answer(f"✅ Пользователь {target} забанен. Причина: {reason}")
+    await message.answer(f"✅ {target} забанен. Причина: {reason}")
 
 @dp.message(Command("unban"))
 async def unban_cmd(message: types.Message):
@@ -1601,17 +1286,15 @@ async def unban_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("/unban <ник/ID>")
         return
     target = args[1]
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
         return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM bans WHERE user_id=?", (target_id,))
         await db.commit()
-    await message.answer(f"✅ Пользователь {target} разбанен.")
+    await message.answer(f"✅ {target} разбанен.")
 
 @dp.message(Command("mute"))
 async def mute_cmd(message: types.Message):
@@ -1624,17 +1307,15 @@ async def mute_cmd(message: types.Message):
     target = args[1]
     mins = int(args[2]) if args[2].isdigit() else 0
     if mins <= 0:
-        await message.answer("Укажите время в минутах больше 0.")
         return
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
         return
     until = datetime.now() + timedelta(minutes=mins)
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT OR REPLACE INTO mutes (user_id, until, muted_by) VALUES (?, ?, ?)", (target_id, until, message.from_user.id))
         await db.commit()
-    await message.answer(f"🔇 Пользователь {target} замучен на {mins} мин.")
+    await message.answer(f"🔇 {target} замучен на {mins} мин.")
 
 @dp.message(Command("unmute"))
 async def unmute_cmd(message: types.Message):
@@ -1642,17 +1323,15 @@ async def unmute_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("/unmute <ник/ID>")
         return
     target = args[1]
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
         return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM mutes WHERE user_id=?", (target_id,))
         await db.commit()
-    await message.answer(f"🔈 Пользователь {target} размучен.")
+    await message.answer(f"🔈 {target} размучен.")
 
 @dp.message(Command("warn"))
 async def warn_cmd(message: types.Message):
@@ -1660,13 +1339,11 @@ async def warn_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.answer("/warn <ник/ID> <причина>")
         return
     target = args[1]
     reason = args[2]
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
         return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("INSERT INTO warns (user_id, reason, warned_by) VALUES (?, ?, ?)", (target_id, reason, message.from_user.id))
@@ -1676,11 +1353,11 @@ async def warn_cmd(message: types.Message):
     if count >= 3:
         until = datetime.now() + timedelta(days=1)
         async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("INSERT OR REPLACE INTO bans (user_id, reason, until, banned_by) VALUES (?, ?, ?, ?)", (target_id, "Автобан за 3 предупреждения", until, message.from_user.id))
+            await db.execute("INSERT OR REPLACE INTO bans (user_id, reason, until, banned_by) VALUES (?, ?, ?, ?)", (target_id, "Автобан за 3 варна", until, message.from_user.id))
             await db.commit()
-        await message.answer(f"⚠️ Пользователь {target} получил {count} предупреждения и автоматически забанен на 1 день.")
+        await message.answer(f"⚠️ {target} забанен на 1 день (3 варна)")
     else:
-        await message.answer(f"⚠️ Пользователь {target} получил предупреждение ({count}/3). Причина: {reason}")
+        await message.answer(f"⚠️ {target}: варн {count}/3. Причина: {reason}")
 
 @dp.message(Command("unwarn"))
 async def unwarn_cmd(message: types.Message):
@@ -1688,22 +1365,19 @@ async def unwarn_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("/unwarn <ник/ID> — снять последнее предупреждение")
         return
     target = args[1]
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
         return
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT id FROM warns WHERE user_id=? ORDER BY date DESC LIMIT 1", (target_id,)) as cursor:
             row = await cursor.fetchone()
         if not row:
-            await message.answer("У пользователя нет предупреждений.")
             return
         await db.execute("DELETE FROM warns WHERE id=?", (row[0],))
         await db.commit()
-    await message.answer(f"Последнее предупреждение пользователя {target} снято.")
+    await message.answer(f"✅ Варн снят с {target}")
 
 @dp.message(Command("check"))
 async def check_cmd(message: types.Message):
@@ -1711,23 +1385,21 @@ async def check_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("/check <ник/ID>")
         return
     target = args[1]
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
         return
-    nick = await get_nickname(target_id) or "Неизвестный"
+    nick = await get_nickname(target_id) or "?"
     elo = await get_elo(target_id)
-    is_b = await is_banned(target_id)
-    is_m = await is_muted(target_id)
+    ib = await is_banned(target_id)
+    im = await is_muted(target_id)
     vip = await is_vip(target_id)
     plat = await is_platinum(target_id)
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COUNT(*) FROM warns WHERE user_id=? AND date > datetime('now', '-30 days')", (target_id,)) as cursor:
             warns = (await cursor.fetchone())[0]
-    await message.answer(f"👤 {nick} (ID: {target_id})\n🏅 Elo: {elo}\n⛔ Бан: {'да' if is_b else 'нет'}\n🔇 Мут: {'да' if is_m else 'нет'}\n⚠️ Варнов (30 дн): {warns}\n👑 VIP: {'да' if vip else 'нет'}\n💠 Платина: {'да' if plat else 'нет'}")
+    await message.answer(f"👤 {nick} (ID:{target_id})\n🏅 Elo:{elo}\n⛔ Бан:{'да' if ib else 'нет'}\n🔇 Мут:{'да' if im else 'нет'}\n⚠️ Варны:{warns}\n👑 VIP:{'да' if vip else 'нет'}\n💠 Платина:{'да' if plat else 'нет'}")
 
 @dp.message(Command("banlist"))
 async def banlist_cmd(message: types.Message):
@@ -1737,13 +1409,10 @@ async def banlist_cmd(message: types.Message):
         async with db.execute("SELECT user_id, reason, until FROM bans WHERE until IS NULL OR until > ?", (datetime.now(),)) as cursor:
             rows = await cursor.fetchall()
     if not rows:
-        await message.answer("Нет активных банов.")
+        await message.answer("Нет банов.")
         return
-    lines = []
-    for uid, reason, until in rows:
-        nick = await get_nickname(uid) or str(uid)
-        lines.append(f"{nick}: {reason} (до {until})")
-    await message.answer("⛔ **Активные баны:**\n" + "\n".join(lines))
+    lines = [f"{await get_nickname(uid) or uid}: {r} (до {u})" for uid, r, u in rows]
+    await message.answer("⛔ **Баны:**\n" + "\n".join(lines))
 
 @dp.message(Command("mutelist"))
 async def mutelist_cmd(message: types.Message):
@@ -1753,13 +1422,10 @@ async def mutelist_cmd(message: types.Message):
         async with db.execute("SELECT user_id, until FROM mutes WHERE until > ?", (datetime.now(),)) as cursor:
             rows = await cursor.fetchall()
     if not rows:
-        await message.answer("Нет активных мутов.")
+        await message.answer("Нет мутов.")
         return
-    lines = []
-    for uid, until in rows:
-        nick = await get_nickname(uid) or str(uid)
-        lines.append(f"{nick}: до {until}")
-    await message.answer("🔇 **Активные муты:**\n" + "\n".join(lines))
+    lines = [f"{await get_nickname(uid) or uid}: до {u}" for uid, u in rows]
+    await message.answer("🔇 **Муты:**\n" + "\n".join(lines))
 
 @dp.message(Command("resetelo"))
 async def resetelo_cmd(message: types.Message):
@@ -1767,17 +1433,15 @@ async def resetelo_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("/resetelo <ник/ID>")
         return
     target = args[1]
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
         return
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE users SET elo=1000 WHERE user_id=?", (target_id,))
         await db.commit()
-    await message.answer(f"Рейтинг пользователя {target} сброшен до 1000.")
+    await message.answer(f"✅ {target}: elo → 1000")
 
 @dp.message(Command("addelo"))
 async def addelo_cmd(message: types.Message):
@@ -1785,31 +1449,39 @@ async def addelo_cmd(message: types.Message):
         return
     args = message.text.split(maxsplit=2)
     if len(args) < 3:
-        await message.answer("/addelo <ник/ID> <изменение (может быть отрицательным)>")
         return
     target = args[1]
     try:
         delta = int(args[2])
     except:
-        await message.answer("Изменение должно быть числом (например, 50 или -100).")
         return
     target_id = target.isdigit() and int(target) or await get_user_id_by_nick(target)
     if not target_id:
-        await message.answer("Пользователь не найден.")
         return
-    current_elo = await get_elo(target_id)
-    new_elo = current_elo + delta
+    cur = await get_elo(target_id)
+    new = cur + delta
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE users SET elo=? WHERE user_id=?", (new_elo, target_id))
+        await db.execute("UPDATE users SET elo=? WHERE user_id=?", (new, target_id))
         await db.commit()
-    await message.answer(f"Рейтинг пользователя {target} изменён на {delta} (текущий: {current_elo} → {new_elo}).")
+    await message.answer(f"✅ {target}: {cur} → {new} ({'+' if delta > 0 else ''}{delta})")
 
 @dp.message()
 async def other_text(message: types.Message):
-    await message.answer("Используй кнопки меню или отправь фото для оценки.", reply_markup=get_main_keyboard())
+    await message.answer("Используй кнопки или /help", reply_markup=get_main_keyboard())
 
 async def handle_health(request):
     return web.Response(text="ok", status=200)
+
+async def self_ping():
+    import aiohttp as aio
+    while True:
+        try:
+            async with aio.ClientSession() as session:
+                async with session.get("http://127.0.0.1:8080/") as resp:
+                    pass
+        except:
+            pass
+        await asyncio.sleep(600)
 
 async def start_http_server():
     app = web.Application()
@@ -1819,57 +1491,22 @@ async def start_http_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
-    logging.info("HTTP server started on port 8080")
-
-async def self_ping():
-    import aiohttp
-    while True:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get("http://127.0.0.1:8080/") as resp:
-                    logging.info(f"Self-ping: {resp.status}")
-        except Exception as e:
-            logging.warning(f"Self-ping failed: {e}")
-        await asyncio.sleep(600)
+    logging.info("HTTP server on :8080")
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     logging.info("=== Starting moggme-tg-bot ===")
-    try:
-        logging.info("Step 1: init_db...")
-        await init_db()
-        logging.info("Step 1: OK")
-    except Exception as e:
-        logging.error(f"Step 1 FAILED: {e}")
-
-    try:
-        logging.info("Step 2: register middleware...")
-        dp.message.middleware.register(SubscriptionMiddleware())
-        logging.info("Step 2: OK")
-    except Exception as e:
-        logging.error(f"Step 2 FAILED: {e}")
-
-    try:
-        logging.info("Step 3: create tasks...")
-        asyncio.create_task(update_quests())
-        asyncio.create_task(self_ping())
-        logging.info("Step 3: OK")
-    except Exception as e:
-        logging.error(f"Step 3 FAILED: {e}")
-
-    try:
-        logging.info("Step 4: start http server...")
-        await start_http_server()
-        logging.info("Step 4: OK - HTTP server on port 8080")
-    except Exception as e:
-        logging.error(f"Step 4 FAILED: {e}")
-
-    logging.info("Step 5: Starting bot polling...")
-    try:
-        await dp.start_polling(bot)
-    except Exception as e:
-        logging.error(f"Bot polling CRASHED: {e}", exc_info=True)
-        raise
+    logging.info("Step 1: init_db...")
+    await init_db()
+    logging.info("Step 2: middleware...")
+    dp.message.middleware.register(SubscriptionMiddleware())
+    logging.info("Step 3: tasks...")
+    asyncio.create_task(update_quests())
+    asyncio.create_task(self_ping())
+    logging.info("Step 4: http server...")
+    await start_http_server()
+    logging.info("Step 5: polling...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
