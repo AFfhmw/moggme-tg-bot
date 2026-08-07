@@ -1821,13 +1821,25 @@ async def start_http_server():
     await site.start()
     logging.info("HTTP server started on port 8080")
 
+async def self_ping():
+    import aiohttp
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("http://127.0.0.1:8080/") as resp:
+                    logging.info(f"Self-ping: {resp.status}")
+        except Exception as e:
+            logging.warning(f"Self-ping failed: {e}")
+        await asyncio.sleep(600)
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
     dp.message.middleware.register(SubscriptionMiddleware())
     asyncio.create_task(update_quests())
+    asyncio.create_task(self_ping())
     await start_http_server()
-    print("Бот запущен. Health-check на порту 8080.")
+    print("Бот запущен. Health-check на порту 8080. Self-ping каждые 10 мин.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
