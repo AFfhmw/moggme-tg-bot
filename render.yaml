@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: moggme-tg-bot
+    runtime: docker
+    repo: https://github.com/AFfhmw/moggme-tg-bot
+    branch: master
+    plan: free
+    region: frankfurt
+    healthCheckPath: /
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
