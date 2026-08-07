@@ -296,7 +296,7 @@ def _analyze_in_worker(image_bytes):
                        "gold_horiz": gold_horiz_score, "tilt": tilt_score}
     }
 
-_pool = ProcessPoolExecutor(max_workers=1)
+_pool = ProcessPoolExecutor(max_workers=1, maxtasksperchild=1)
 
 async def analyze_face_async(image_bytes):
     """Runs analyze_face in a separate process. Process dies after, freeing all memory."""
