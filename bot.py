@@ -4,7 +4,6 @@ import io
 import random
 import math
 import gc
-from concurrent.futures import ProcessPoolExecutor
 from aiogram import Bot, Dispatcher, types, F, BaseMiddleware
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, ReplyKeyboardMarkup, KeyboardButton, LabeledPrice
@@ -296,15 +295,18 @@ def _analyze_in_worker(image_bytes):
                        "gold_horiz": gold_horiz_score, "tilt": tilt_score}
     }
 
-_pool = ProcessPoolExecutor(max_workers=1, maxtasksperchild=1)
-
 async def analyze_face_async(image_bytes):
-    """Runs analyze_face in a separate process. Process dies after, freeing all memory."""
-    loop = asyncio.get_running_loop()
+    """Runs analyze_face in a separate thread with timeout."""
     try:
-        result = await asyncio.wait_for(loop.run_in_executor(_pool, _analyze_in_worker, image_bytes), timeout=60)
-    except (asyncio.TimeoutError, Exception) as e:
-        result = {"error": f"Ошибка анализа: {type(e).__name__}: {e}"}
+        loop = asyncio.get_running_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, _analyze_in_worker, image_bytes),
+            timeout=60
+        )
+    except asyncio.TimeoutError:
+        result = {"error": "Анализ занял слишком nhiều времени. Попробуй другое фото."}
+    except Exception as e:
+        result = {"error": f"Ошибка анализа: {e}"}
     gc.collect()
     return result
 
